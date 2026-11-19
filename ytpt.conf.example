@@ -1,0 +1,65 @@
+# ytpt configuration file
+#
+# All values are commented out and show their defaults.
+# Relative paths are resolved relative to the directory containing ytpt.py
+# (except db_file, cookies_file, and log_dir, which are relative to config_dir).
+#
+# Precedence: CLI args > env vars > this file > built-in defaults.
+
+[paths]
+# config_dir   = "./config"
+# data_dir     = "./data"
+# temp_dir     = "./config/temp"        # in-progress downloads land here first
+# cookies_file = "cookies.txt"          # relative to config_dir
+# db_file      = "ytpt.db"              # relative to config_dir
+# log_dir      = "logs"                 # relative to config_dir
+
+[download]
+# max_height           = null           # cap resolution; omit for uncapped best (takes a int (1080))
+# limit_rate           = "5M"           # yt-dlp rate string (e.g. "500K", "5M")
+# concurrent_fragments = 1
+# max_retries          = 5
+# subtitle_languages   = ["en"]         # ISO codes; use ["all"] for everything
+# download_thumbnail   = true
+# embed_chapters       = true
+# write_info_json      = true
+# download_comments    = false          # save comments into the .info.json
+# max_comments         = 500            # cap per video, replies included
+
+[postprocess]
+# remux_to  = null                      # lossless container swap (takes string "mp4")
+# recode_to = null                      # FULL transcode - has some quality loss, off by default (takes string "mp4")
+
+[scheduler]
+# gap_min_seconds                  = 480   # 8 min
+# gap_max_seconds                  = 720   # 12 min
+# playlist_check_interval_seconds  = 86400 # 24 hours
+
+[server]
+# enabled       = false                 # Should we server the web API
+# host          = "127.0.0.1"
+# port          = 8000
+# cors_origins  = []                    # browser origins allowed to call the API (e.g. Vite dev server)
+# frontend_dir  = "frontend/dist"       # built web UI, served at / when it exists
+# Env overrides: YTPT_SERVER_ENABLED / YTPT_SERVER_HOST / YTPT_SERVER_PORT.
+# No authentication: keep host on 127.0.0.1 or put it behind Tailscale / a reverse proxy.
+# default_sort  = "newest_archived"
+
+[ytdlp]
+# auto_update = true
+
+[naming]
+# {category} is replaced by one of the [folders] names below.
+# MUST end with "[{id}].{ext}". This prevents name collisions and
+# lets lost files be re-located later.
+# template = "{category}/{title} [{id}].{ext}"
+
+[folders]
+# Downloads are filed by type, not by playlist. First match wins:
+#   audio-only -> audio | YouTube Short -> shorts | long video -> movies | rest -> video
+# audio  = "audio"
+# video  = "video"
+# shorts = "shorts"
+# movies = "movies"
+# shorts_max_seconds = 180   # fallback rule if YouTube doesn't flag a Short: <= this AND vertical/square
+# movie_min_minutes  = 55    # this long or longer goes to "movies"; -1 (any value <= 0) disables it

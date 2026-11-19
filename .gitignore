@@ -1,0 +1,21 @@
+/config/
+/data/
+# Only here to save bacon, NEVER PUSH THIS FILE.
+cookies.txt
+cookies.*
+
+ytpt.conf
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+.vscode/

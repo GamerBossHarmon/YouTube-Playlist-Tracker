@@ -1,0 +1,24 @@
+services:
+  ytpt:
+    build: .
+    restart: unless-stopped
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./ytpt.conf:/app/ytpt.conf:ro
+    user: "1000:1000"
+
+    # In order to use the API and hook up ytpt-GUI, Uncomment the following three blocks.
+    # It's recomend to bind to 0.0.0.0 as I dont do any authentication.
+    # Only widen the mapping when behind Tailscale or a reverse proxy.
+    # environment:
+    #   YTPT_SERVER_ENABLED: "true"
+    #   YTPT_SERVER_HOST: "0.0.0.0"
+    # ports:
+    #   - "127.0.0.1:8000:8000"
+    # healthcheck:
+    #   test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+    #   interval: 30s
+    #   timeout: 5s
+    #   retries: 3
+    #   start_period: 20s

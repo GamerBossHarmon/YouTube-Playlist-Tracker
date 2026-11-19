@@ -1,0 +1,26 @@
+config
+data
+cookies.txt
+cookies.*
+*.db
+*.db-wal
+*.db-shm
+
+# VCS / tooling / editors
+.git
+.gitignore
+.gitattributes
+.venv
+.pytest_cache
+.vscode
+__pycache__
+**/__pycache__
+*.pyc
+
+# Not needed at runtime
+tests
+requirements-dev.txt
+pyproject.toml
+*.mdS
+Dockerfile
+docker-compose*.yml
