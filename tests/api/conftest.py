@@ -29,7 +29,8 @@ def fake_check_result(entries, *, success=True, title="Fake Playlist", error=Non
 def fake_scheduler():
     """Stands in for core.scheduler.Scheduler: the API only reads .progress,
     .next_download_at and .is_running from it."""
-    return SimpleNamespace(progress=ProgressRegistry(), next_download_at=None, is_running=True, wake=lambda: None)
+    stop_calls: list[str] = []
+    return SimpleNamespace(stop_calls=stop_calls, progress=ProgressRegistry(), next_download_at=None, is_running=True, wake=lambda: None, request_stop=lambda vid: stop_calls.append(vid))
 
 
 @pytest.fixture

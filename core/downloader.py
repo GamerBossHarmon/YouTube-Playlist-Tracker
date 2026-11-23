@@ -359,17 +359,36 @@ def _cleanup_failed_download(options: DownloadOptions, youtube_id: Optional[str]
 # --- Public API ------------------------------------------------------------
 
 
+class DownloadStopped(Exception):
+    """Raised from inside yt-dlp's progress hook to abort a download the user stopped."""
+
+
+def _caused_by_stop(exc: BaseException) -> bool:
+    seen = 0
+    while exc is not None and seen < 10:
+        if isinstance(exc, DownloadStopped):
+            return True
+        exc = exc.__cause__ or exc.__context__
+        seen += 1
+    return False
+
+
 def download_video(
     video_url_or_id: str,
     options: DownloadOptions,
     on_progress: Optional[Callable[[dict[str, Any]], None]] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> DownloadResult:
     """Download exactly one video. Never raises failures come back as a
     DownloadResult with success=False and a best-effort failure_reason.
 
     on_progress, if given, receives each raw yt-dlp progress dict (live
     progress). Exceptions it raises are swallowed so a broken
-    observer can never fail a download."""
+    observer can never fail a download.
+
+    should_stop, if given, is polled on every progress tick; once it returns
+    True the download is aborted (failure_reason=cancelled). It can't interrupt
+    the probe or post-processing, which don't report progress."""
     url = _normalize_url(video_url_or_id)
     started_at = _utcnow()
     logger = CapturingLogger()
@@ -385,6 +404,8 @@ def download_video(
                 on_progress(d)
             except Exception:  # noqa: BLE001, observer failures must not fail the download
                 pass
+        if should_stop is not None and should_stop():
+            raise DownloadStopped()
 
     ydl_opts = _build_ydl_opts(options, logger, _progress_hook)
 
@@ -402,9 +423,17 @@ def download_video(
                 # Final destination is now known; temp stays category-free.
                 ydl.params["paths"]["home"] = str(options.data_dir / category)
             info = ydl.process_ie_result(probed, download=True)
+    except DownloadStopped:
+        error_message = "Stopped by the user"
+        failure_reason = FailureReason.cancelled
     except DownloadError as exc:
-        error_message = str(exc)
-        failure_reason = classify_failure(error_message)
+        # yt-dlp can wrap an exception raised by a hook; look through the chain.
+        if _caused_by_stop(exc):
+            error_message = "Stopped by the user"
+            failure_reason = FailureReason.cancelled
+        else:
+            error_message = str(exc)
+            failure_reason = classify_failure(error_message)
     except Exception as exc:  # noqa: BLE001, never let a single video crash the caller
         error_message = str(exc)
         failure_reason = FailureReason.download_error

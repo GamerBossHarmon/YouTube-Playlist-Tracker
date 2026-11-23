@@ -81,6 +81,25 @@ class Scheduler:
         self.next_download_at: Optional[float] = None
         # Set by wake() (API "download now") to cut the current wait short.
         self._wake_event = threading.Event()
+        # Videos the user pressed Fail on while they were downloading.
+        self._stop_requests: set[str] = set()
+        self._stop_lock = threading.Lock()
+
+    def request_stop(self, video_id: str) -> None:
+        """Abort this video's in-flight download and fail it for good (no retries).
+        Takes effect at the next progress tick, or when the current attempt ends."""
+        with self._stop_lock:
+            self._stop_requests.add(video_id)
+
+    def _stop_requested(self, video_id: str) -> bool:
+        with self._stop_lock:
+            return video_id in self._stop_requests
+
+    def _consume_stop(self, video_id: str) -> bool:
+        with self._stop_lock:
+            found = video_id in self._stop_requests
+            self._stop_requests.discard(video_id)
+            return found
 
     @property
     def is_running(self) -> bool:
@@ -204,6 +223,7 @@ class Scheduler:
 
             video.status = VideoStatus.downloading
             video.priority_at = None  # consumed; a failed retry goes back in line normally
+            video.queue_rank = None
             download_account = video.download_account
             video.download_account = None  # one-time override, consumed too
             video.updated_at = _utcnow()
@@ -217,6 +237,7 @@ class Scheduler:
             # this session closes raises DetachedInstanceError, so nothing
             # below this point may touch `video` or `source` directly.
             video_id = video.youtube_id
+            self._consume_stop(video_id)  # drop a stale request from an earlier attempt
             source_id = source.id if source else None
             data_dir_override = Path(source.data_dir) if (source and source.data_dir) else None
 
@@ -235,11 +256,15 @@ class Scheduler:
         # need the DB.
         try:
             result = download_video(
-                video_id, options, on_progress=lambda d: self.progress.update(video_id, d)
+                video_id,
+                options,
+                on_progress=lambda d: self.progress.update(video_id, d),
+                should_stop=lambda: self._stop_requested(video_id),
             )
         finally:
             self.progress.clear(video_id)
 
+        stopped = self._consume_stop(video_id)
         with get_session(self.engine) as session:
             archive.record_download_attempt_result(
                 session,
@@ -247,6 +272,10 @@ class Scheduler:
                 source_id=source_id,
                 result=result,
                 max_retries=self.config.download.max_retries,
+                stopped=stopped,
             )
+
+        if stopped and not result.success:
+            return None  # the user cut this one short; no reason to pace the next download
 
         return random.uniform(self.config.scheduler.gap_min_seconds, self.config.scheduler.gap_max_seconds)

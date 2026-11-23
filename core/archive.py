@@ -635,9 +635,60 @@ def queue_snapshot(session: Session) -> QueueSnapshot:
     return QueueSnapshot(downloading=list(downloading), queued=list(queued))
 
 
-# Worker pop order: "download now" videos first (most recent request on top),
-# then oldest-queued first.
-QUEUE_ORDER = (Video.priority_at.desc().nulls_last(), Video.created_at.asc(), Video.youtube_id.asc())
+# Worker pop order: hand-placed videos first (queue_rank ascending; "download
+# now" puts its video above every other rank, latest request on top), then
+# everything never placed by hand, oldest-queued first.
+QUEUE_ORDER = (
+    Video.queue_rank.asc().nulls_last(),
+    Video.priority_at.desc().nulls_last(),
+    Video.created_at.asc(),
+    Video.youtube_id.asc(),
+)
+
+
+def move_queued_video(session: Session, youtube_id: str, position: int) -> Video:
+    """Put a queued video at 1-based `position` in the download queue (clamped to
+    the queue's length). Every queued video gets an explicit rank so the order
+    stays exactly as shown. LookupError if unknown, ValueError if not queued."""
+    video = get_video(session, youtube_id)
+    if video is None:
+        raise LookupError(f"No video with id {youtube_id}")
+    if video.status != VideoStatus.queued:
+        raise ValueError(f"Video is '{video.status.value}', only queued videos can be reordered")
+    queued = list(session.exec(select(Video).where(Video.status == VideoStatus.queued).order_by(*QUEUE_ORDER)).all())
+    queued.remove(video)
+    queued.insert(max(0, min(position - 1, len(queued))), video)
+    now = _utcnow()
+    for rank, v in enumerate(queued):
+        if v.queue_rank != rank:
+            v.queue_rank = rank
+            v.updated_at = now
+            session.add(v)
+    session.commit()
+    session.refresh(video)
+    return video
+
+
+def fail_queued_video(session: Session, youtube_id: str) -> Video:
+    """Mark a video 'failed' by hand. Only for videos waiting in the queue; an
+    in-flight download is stopped through the scheduler instead. It can be
+    retried like any failed video. LookupError if unknown, ValueError if not queued."""
+    video = get_video(session, youtube_id)
+    if video is None:
+        raise LookupError(f"No video with id {youtube_id}")
+    if video.status != VideoStatus.queued:
+        raise ValueError(f"Video is '{video.status.value}', only queued or downloading videos can be failed")
+    video.status = VideoStatus.failed
+    video.failure_reason = FailureReason.cancelled
+    video.queue_rank = None
+    video.priority_at = None
+    video.download_account = None
+    video.updated_at = _utcnow()
+    session.add(video)
+    events.log_video_stopped(session, video_id=youtube_id, source_id=None)
+    session.commit()
+    session.refresh(video)
+    return video
 
 
 def redownload_video(session: Session, youtube_id: str) -> Video:
@@ -705,6 +756,9 @@ def prioritize_video(session: Session, youtube_id: str, *, account: Optional[str
     elif video.status != VideoStatus.queued:
         raise ValueError(f"Video is '{video.status.value}', only queued or failed videos can be downloaded now")
     video.status = VideoStatus.queued
+    # Above every hand-placed video; the latest request goes first.
+    lowest = session.exec(select(func.min(Video.queue_rank)).where(Video.status == VideoStatus.queued)).one()
+    video.queue_rank = 0 if lowest is None else lowest - 1
     # Strictly later than every pending request, even within one clock tick, so
     # "latest request goes first" never degrades to a tie.
     now = _utcnow()
@@ -791,10 +845,13 @@ def record_download_attempt_result(
     source_id: Optional[int],
     result: DownloadResult,
     max_retries: int,
+    stopped: bool = False,
 ) -> DownloadAttempt:
     """Persists one DownloadAttempt row and updates the Video row's status
     accordingly. Only flips to 'failed' once retry_count hits
-    max_retries; before that it goes back to 'queued' for a later retry."""
+    max_retries; before that it goes back to 'queued' for a later retry.
+    `stopped` (the user pressed Fail) fails a failed attempt for good right away,
+    without using up a retry."""
     video = session.get(Video, video_id)
     if video is None:
         video = Video(youtube_id=video_id, status=VideoStatus.queued)
@@ -836,6 +893,10 @@ def record_download_attempt_result(
         events.log_video_downloaded(
             session, video_id=video_id, source_id=source_id, attempt_id=attempt.id, title=video.title
         )
+    elif stopped:
+        video.failure_reason = FailureReason.cancelled
+        video.status = VideoStatus.failed
+        events.log_video_stopped(session, video_id=video_id, source_id=source_id, attempt_id=attempt.id)
     else:
         video.retry_count += 1
         video.failure_reason = result.failure_reason

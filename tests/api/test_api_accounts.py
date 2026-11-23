@@ -115,7 +115,7 @@ def test_download_now_with_account_is_one_time(client, session, engine, config, 
 
     seen = []
 
-    def fake_download(video_id, options, on_progress=None):
+    def fake_download(video_id, options, on_progress=None, should_stop=None):
         seen.append(options.cookies_file)
         now = datetime.now(timezone.utc)
         return DownloadResult(

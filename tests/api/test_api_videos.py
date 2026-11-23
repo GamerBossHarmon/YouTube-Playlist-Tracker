@@ -231,6 +231,40 @@ def test_download_now_prioritizes_queue_and_requeues_failed(client, session):
     assert client.post("/api/videos/nope/download-now").status_code == 404
 
 
+def test_move_reorders_queue(client, session):
+    for i, vid in enumerate(["a", "b", "c"]):
+        add_video(session, vid, VideoStatus.queued, hours=i)
+    add_video(session, "ok")
+
+    r = client.post("/api/videos/c/move", json={"position": 1})
+    assert r.status_code == 200
+    assert [i["video"]["youtube_id"] for i in client.get("/api/queue").json()["queued"]] == ["c", "a", "b"]
+    client.post("/api/videos/c/move", json={"position": 50})
+    assert [i["video"]["youtube_id"] for i in client.get("/api/queue").json()["queued"]] == ["a", "b", "c"]
+
+    assert client.post("/api/videos/a/move", json={"position": 0}).status_code == 422
+    assert client.post("/api/videos/ok/move", json={"position": 1}).status_code == 409
+    assert client.post("/api/videos/nope/move", json={"position": 1}).status_code == 404
+
+
+def test_fail_queued_video_and_downloading_video(client, session, fake_scheduler):
+    add_video(session, "q", VideoStatus.queued)
+    add_video(session, "dl", VideoStatus.downloading)
+    add_video(session, "ok")
+
+    r = client.post("/api/videos/q/fail")
+    assert r.status_code == 200 and r.json()["status"] == "failed" and r.json()["failure_reason"] == "cancelled"
+    assert client.get("/api/queue").json()["queued_total"] == 0
+
+    r = client.post("/api/videos/dl/fail")  # aborted by the worker, so still downloading for now
+    assert r.status_code == 200 and r.json()["status"] == "downloading"
+    assert fake_scheduler.stop_calls == ["dl"]
+
+    assert client.post("/api/videos/ok/fail").status_code == 409
+    assert client.post("/api/videos/nope/fail").status_code == 404
+    assert client.post("/api/videos/q/retry").json()["status"] == "queued"
+
+
 def test_video_comments_threaded_paged_and_unavailable(client, session, tmp_path):
     import json
 

@@ -21,7 +21,7 @@ from pathlib import Path
 
 from ..convert import progress_out, video_out
 from ..deps import get_config, get_paths, get_progress, get_scheduler, get_session
-from ..schemas import AttemptOut, CommentsOut, DownloadNowRequest, LocateOut, Page, QueueItem, QueueOut, VideoDetail, VideoMembership, VideoOut
+from ..schemas import AttemptOut, CommentsOut, DownloadNowRequest, LocateOut, MoveRequest, Page, QueueItem, QueueOut, VideoDetail, VideoMembership, VideoOut
 
 router = APIRouter(tags=["videos"])
 
@@ -274,6 +274,42 @@ def download_now(
         raise HTTPException(status_code=409, detail=str(exc))
     if scheduler is not None:
         scheduler.wake()
+    return video_out(video)
+
+
+@router.post("/videos/{youtube_id}/move", response_model=VideoOut)
+def move_video(youtube_id: str, body: MoveRequest, session: Session = Depends(get_session)):
+    """Reorder the download queue: put a queued video at a 1-based position."""
+    try:
+        video = archive.move_queued_video(session, youtube_id, body.position)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return video_out(video)
+
+
+@router.post("/videos/{youtube_id}/fail", response_model=VideoOut)
+def fail_video(
+    youtube_id: str,
+    session: Session = Depends(get_session),
+    scheduler: Optional[Scheduler] = Depends(get_scheduler),
+):
+    """Give up on a video now instead of waiting out its retries. A queued video
+    is marked failed immediately. A downloading one is aborted at the next
+    progress tick (or when its current attempt ends) and then marked failed with
+    no further retries; the response still says 'downloading' until then.
+    Failed videos can be retried afterwards."""
+    video = _require_video(session, youtube_id)
+    if video.status == VideoStatus.downloading:
+        if scheduler is None:
+            raise HTTPException(status_code=409, detail="The download worker is not running in this process")
+        scheduler.request_stop(youtube_id)
+        return video_out(video)
+    try:
+        video = archive.fail_queued_video(session, youtube_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     return video_out(video)
 
 

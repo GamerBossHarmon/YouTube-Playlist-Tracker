@@ -308,6 +308,10 @@ class AccountPlaylistOut(BaseModel):
     source_id: Optional[int] = None  # set if already tracked
 
 
+class MoveRequest(BaseModel):
+    position: int = Field(ge=1, description="1-based place in the download queue (clamped to its length)")
+
+
 class DownloadNowRequest(BaseModel):
     account: Optional[str] = None  # one-time: download this video with this account's cookies
 

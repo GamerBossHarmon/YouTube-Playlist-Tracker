@@ -46,6 +46,7 @@ class FailureReason(str, Enum):
     members_only = "members_only"
     unavailable_unknown = "unavailable_unknown"
     download_error = "download_error"
+    cancelled = "cancelled"  # the user pressed Fail; not a YouTube-side problem
 
 
 class EventSeverity(str, Enum):
@@ -107,6 +108,9 @@ class Video(SQLModel, table=True):
     retry_count: int = Field(default=0)
 
     priority_at: Optional[datetime] = Field(default=None, sa_column=Column(UTCDateTime))
+    # Manual queue position (lower = sooner). Null = never placed by hand, goes
+    # after every ranked video in created_at order. Cleared when the download starts.
+    queue_rank: Optional[int] = Field(default=None)
     # One-time "download with this account" override; consumed when the download starts.
     download_account: Optional[str] = None
 	# Purely a flag, nothing is re-downloaded because of it.

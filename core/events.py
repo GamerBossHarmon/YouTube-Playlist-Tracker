@@ -163,6 +163,20 @@ def log_video_failed_permanently(session: Session, *, video_id: str, source_id: 
     )
 
 
+def log_video_stopped(
+    session: Session, *, video_id: str, source_id: Optional[int], attempt_id: Optional[int] = None
+) -> Event:
+    return log_event(
+        session,
+        "video_failed",  # same type as running out of retries, so existing GUI refresh logic applies
+        "Marked as failed by the user",
+        severity=EventSeverity.warning,
+        source_id=source_id,
+        video_id=video_id,
+        attempt_id=attempt_id,
+    )
+
+
 def log_video_tombstoned(session: Session, *, video_id: str, source_id: Optional[int]) -> Event:
     return log_event(
         session,
