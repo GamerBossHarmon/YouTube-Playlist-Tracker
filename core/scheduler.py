@@ -29,7 +29,7 @@ import logging
 import random
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -37,7 +37,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.engine import Engine
 from sqlmodel import select
 
-from . import accounts, archive, events
+from . import accounts, archive, events, ytdlp_update
 from .config import Config
 from .db import get_session
 from .downloader import build_download_options, download_video
@@ -53,6 +53,16 @@ _CHECK_SWEEP_JOB_ID = "check_sources_sweep"
 # each source's own check_interval_seconds this is just the
 # sweep's own granularity.
 _SWEEP_INTERVAL_SECONDS = 60
+
+_YTDLP_UPDATE_JOB_ID = "update_ytdlp"
+
+# How often to try upgrading yt-dlp (when ytdlp.auto_update is on). A no-op pip
+# run is cheap, and a run skipped because a download was in flight just gets
+# another chance at the next tick.
+_YTDLP_UPDATE_INTERVAL_SECONDS = 6 * 60 * 60
+
+# First attempt shortly after startup so a fresh start picks up a new release.
+_YTDLP_UPDATE_STARTUP_DELAY_SECONDS = 30
 
 # How often the download worker re-polls while the queue is empty. Distinct
 # from the jittered gap, which only applies *between completed downloads*.
@@ -84,6 +94,11 @@ class Scheduler:
         # Videos the user pressed Fail on while they were downloading.
         self._stop_requests: set[str] = set()
         self._stop_lock = threading.Lock()
+        # Held while a download runs; the yt-dlp updater takes it too so pip
+        # never swaps files under an in-flight download.
+        self._download_lock = threading.Lock()
+        # Outcome of the most recent yt-dlp update attempt (None = never ran).
+        self.last_ytdlp_update: Optional[ytdlp_update.UpdateResult] = None
 
     def request_stop(self, video_id: str) -> None:
         """Abort this video's in-flight download and fail it for good (no retries).
@@ -120,6 +135,14 @@ class Scheduler:
             id=_CHECK_SWEEP_JOB_ID,
             next_run_time=_utcnow(),
         )
+        if self.config.ytdlp.auto_update:
+            self._scheduler.add_job(
+                self.update_ytdlp,
+                "interval",
+                seconds=_YTDLP_UPDATE_INTERVAL_SECONDS,
+                id=_YTDLP_UPDATE_JOB_ID,
+                next_run_time=_utcnow() + timedelta(seconds=_YTDLP_UPDATE_STARTUP_DELAY_SECONDS),
+            )
         self._scheduler.start()
 
         self._stop_event.clear()
@@ -133,6 +156,34 @@ class Scheduler:
         self._scheduler.shutdown(wait=wait)
         if wait and self._worker_thread is not None:
             self._worker_thread.join(timeout=30)
+
+    # --- yt-dlp self-update ---------------------------------------
+
+    def update_ytdlp(self) -> ytdlp_update.UpdateResult:
+        """Upgrade yt-dlp via pip. Skipped (reported as a failure) while a
+        download is running. The new version only takes effect after a restart;
+        see ytdlp_update.restart_required()."""
+        if not self._download_lock.acquire(blocking=False):
+            result = ytdlp_update.UpdateResult(
+                False,
+                ytdlp_update.installed_version(),
+                ytdlp_update.installed_version(),
+                "a download is in progress; try again when it finishes",
+            )
+            self.last_ytdlp_update = result
+            return result
+        try:
+            result = ytdlp_update.update_ytdlp()
+        finally:
+            self._download_lock.release()
+        self.last_ytdlp_update = result
+        if result.upgraded:
+            logger.warning(
+                "yt-dlp upgraded %s -> %s; restart ytpt to use it", result.old_version, result.new_version
+            )
+        elif not result.success:
+            logger.warning("yt-dlp update failed: %s", result.error_message)
+        return result
 
     # --- Playlist/channel check sweep ---------------------------
 
@@ -255,12 +306,13 @@ class Scheduler:
         # Download outside the session, it can take a long time and doesn't
         # need the DB.
         try:
-            result = download_video(
-                video_id,
-                options,
-                on_progress=lambda d: self.progress.update(video_id, d),
-                should_stop=lambda: self._stop_requested(video_id),
-            )
+            with self._download_lock:
+                result = download_video(
+                    video_id,
+                    options,
+                    on_progress=lambda d: self.progress.update(video_id, d),
+                    should_stop=lambda: self._stop_requested(video_id),
+                )
         finally:
             self.progress.clear(video_id)
 

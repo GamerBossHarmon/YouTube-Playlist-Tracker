@@ -319,9 +319,21 @@ class DownloadNowRequest(BaseModel):
 # --- System -----------------------------------------------------------------------
 
 
+class YtdlpUpdateOut(BaseModel):
+    success: bool
+    upgraded: bool
+    old_version: Optional[str] = None
+    new_version: Optional[str] = None
+    restart_required: bool = False
+    error_message: Optional[str] = None
+
+
 class SystemOut(BaseModel):
     version: str
-    ytdlp_version: str
+    ytdlp_version: str  # the version this process has loaded
+    ytdlp_installed_version: Optional[str] = None  # on disk; differs after an update until restart
+    ytdlp_restart_required: bool = False
+    ytdlp_auto_update: bool = True
     scheduler_running: bool
     cookies_present: bool
     primary_account: Optional[AccountOut] = None  # who the archive downloads as

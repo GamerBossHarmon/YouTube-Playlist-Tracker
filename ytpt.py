@@ -90,6 +90,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("run", help="Run the scheduler daemon (checks + downloads) until interrupted.")
 
+    subparsers.add_parser("update-ytdlp", help="Upgrade yt-dlp (and its solver extras) to the latest release.")
+
     return p
 
 
@@ -127,6 +129,19 @@ def main(argv: list[str] | None = None) -> int:
 
     alembic_ini = paths.entrypoint_dir / ALEMBIC_INI_FILENAME
     migration_rev = run_migrations(paths.db_file, alembic_ini)
+
+    if args.command == "update-ytdlp":  # needs no DB
+        from core.ytdlp_update import update_ytdlp
+
+        result = update_ytdlp()
+        if not result.success:
+            print(f"Update failed: {result.error_message}")
+            return 1
+        if result.upgraded:
+            print(f"yt-dlp upgraded {result.old_version} -> {result.new_version}. Restart ytpt to use it.")
+        else:
+            print(f"yt-dlp already up to date ({result.new_version}).")
+        return 0
 
     if args.command is None:
         _print_bootstrap_summary(
