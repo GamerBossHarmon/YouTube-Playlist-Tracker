@@ -45,6 +45,30 @@ class CapturingLogger:
         self.lines.append(f"ERROR: {msg}")
 
 
+# --- JS runtime diagnosis ----------------------------------------
+
+_JS_RUNTIME_HINT = (
+    "Hint: yt-dlp could not solve YouTube's JS challenge, so no real formats were returned. "
+    "Install a supported JavaScript runtime (Node 22+ or Deno) and make sure the "
+    "'yt-dlp[default]' extra (yt-dlp-ejs) is installed."
+)
+
+_JS_RUNTIME_SIGNS = (
+    "n challenge solving failed",
+    "only images are available",
+    "(unsupported)",
+    "no supported javascript runtime",
+    "challenge solver script",
+)
+
+
+def js_runtime_hint(log_lines: list[str]) -> str | None:
+    """A human-readable hint if the verbose log shows the JS challenge solver
+    wasn't usable (missing/old runtime or missing solver), else None."""
+    haystack = "\n".join(log_lines).lower()
+    return _JS_RUNTIME_HINT if any(sign in haystack for sign in _JS_RUNTIME_SIGNS) else None
+
+
 # --- Failure classification ------------------------------------
 
 _FAILURE_PATTERNS: list[tuple[re.Pattern[str], FailureReason]] = [

@@ -23,7 +23,7 @@ from yt_dlp.utils import DownloadError, parse_bytes, sanitize_filename
 from .config import Config, FoldersConfig
 from .models import FailureReason
 from .paths import ResolvedPaths
-from .ytdlp_support import DEFAULT_JS_RUNTIMES, CapturingLogger, classify_failure
+from .ytdlp_support import DEFAULT_JS_RUNTIMES, CapturingLogger, classify_failure, js_runtime_hint
 
 
 def _utcnow() -> datetime:
@@ -434,6 +434,9 @@ def download_video(
         else:
             error_message = str(exc)
             failure_reason = classify_failure(error_message)
+            hint = js_runtime_hint(logger.lines)
+            if hint and failure_reason == FailureReason.download_error:
+                error_message = f"{error_message}\n{hint}"
     except Exception as exc:  # noqa: BLE001, never let a single video crash the caller
         error_message = str(exc)
         failure_reason = FailureReason.download_error
