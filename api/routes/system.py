@@ -4,7 +4,7 @@ import shutil
 from typing import Optional
 
 import yt_dlp
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy import func
 from sqlmodel import Session, select
 
@@ -19,7 +19,7 @@ from core.scheduler import Scheduler
 
 from ..deps import get_config, get_paths, get_scheduler, get_session
 from ..convert import account_out
-from ..schemas import SystemOut, YtdlpUpdateOut
+from ..schemas import RestartOut, RestartRequest, SystemOut, YtdlpUpdateOut
 
 router = APIRouter(tags=["system"])
 
@@ -33,6 +33,7 @@ def health() -> dict:
 
 @router.get("/system", response_model=SystemOut)
 def system(
+    request: Request,
     session: Session = Depends(get_session),
     config: Config = Depends(get_config),
     paths: ResolvedPaths = Depends(get_paths),
@@ -58,6 +59,8 @@ def system(
         ytdlp_restart_required=ytdlp_update.restart_required(),
         ytdlp_auto_update=config.ytdlp.auto_update,
         scheduler_running=bool(scheduler and scheduler.is_running),
+        download_in_progress=bool(scheduler and getattr(scheduler, "download_in_progress", False)),
+        restart_supported=request.app.state.request_restart is not None,
         cookies_present=paths.cookies_file.is_file(),
         primary_account=account_out(accounts.get_account(paths, None), 0),
         source_count=source_count,
@@ -69,6 +72,26 @@ def system(
         server_exposed=config.server.host not in _LOOPBACK_HOSTS,
         config=config.model_dump(),
     )
+
+
+@router.post("/system/restart", response_model=RestartOut, status_code=202)
+def restart(
+    request: Request,
+    background: BackgroundTasks,
+    body: Optional[RestartRequest] = None,
+    scheduler: Optional[Scheduler] = Depends(get_scheduler),
+) -> RestartOut:
+    """Restart ytpt (checks, downloads and this API) so a freshly installed yt-dlp is
+    picked up. The response comes first; the API is unreachable for a few seconds after.
+    Refused (409) while a download is running unless {"force": true}; an interrupted
+    download simply resumes after the restart."""
+    handler = request.app.state.request_restart
+    if handler is None:
+        raise HTTPException(status_code=501, detail="This ytpt process cannot restart itself (it is not running via `ytpt run`)")
+    if scheduler is not None and getattr(scheduler, "download_in_progress", False) and not (body and body.force):
+        raise HTTPException(status_code=409, detail="A download is in progress. Restarting now would interrupt it.")
+    background.add_task(handler)  # after the response is sent
+    return RestartOut()
 
 
 @router.post("/system/update-ytdlp", response_model=YtdlpUpdateOut)

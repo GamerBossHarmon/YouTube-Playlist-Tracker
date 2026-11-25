@@ -37,11 +37,11 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.engine import Engine
 from sqlmodel import select
 
-from . import accounts, archive, events, ytdlp_update
+from . import accounts, archive, events, upgrades, ytdlp_update
 from .config import Config
 from .db import get_session
 from .downloader import build_download_options, download_video
-from .models import Source, SourceVideo, Video, VideoStatus
+from .models import FailureReason, Source, SourceVideo, Video, VideoStatus
 from .paths import ResolvedPaths
 from .progress import ProgressRegistry
 
@@ -127,6 +127,13 @@ class Scheduler:
                 logger.warning("reset %d video(s) stuck in 'downloading' from a previous run", reset_count)
             events.log_scheduler_started(session, reset_count=reset_count)
             session.commit()
+            upgrades.reset_stuck_upgrades(session, self.paths)
+
+        # Fill in resolution/codec info for files downloaded before it was recorded. Runs in the
+        # background (ffprobe per file can be slow on a big library) and is a no-op once done.
+        threading.Thread(
+            target=self._backfill_formats, name="ytpt-format-backfill", daemon=True
+        ).start()
 
         self._scheduler.add_job(
             self._sweep_checks,
@@ -150,6 +157,18 @@ class Scheduler:
             target=self._download_worker_loop, name="ytpt-download-worker", daemon=True
         )
         self._worker_thread.start()
+
+    def _backfill_formats(self) -> None:
+        try:
+            count = archive.backfill_file_formats(self.engine, should_stop=self._stop_event.is_set)
+            if count:
+                logger.info("recorded the format of %d existing video file(s)", count)
+        except Exception:  # noqa: BLE001, purely cosmetic data; never let it matter
+            logger.exception("format backfill failed")
+
+    @property
+    def download_in_progress(self) -> bool:
+        return self._download_lock.locked()
 
     def shutdown(self, wait: bool = True) -> None:
         self._stop_event.set()
@@ -264,9 +283,58 @@ class Scheduler:
         )
         return session.exec(stmt).first()
 
+    def _run_one_upgrade(self) -> Optional[float]:
+        """Run the oldest queued quality upgrade, if any. Same pacing contract as
+        _run_one_download: returns the gap to wait, or None when there was none.
+        Upgrades are explicit user requests, so they go ahead of the normal queue."""
+        with get_session(self.engine) as session:
+            job = upgrades.claim_next_upgrade(session)
+            if job is None:
+                return None
+            video_id = job.video_id
+            events.log_download_started(session, video_id=video_id, source_id=None)
+            session.commit()
+            account = job.account
+            options = upgrades.build_upgrade_options(
+                build_download_options(
+                    self.config,
+                    self.paths,
+                    cookies_file_override=accounts.cookies_for(self.paths, account) if account else None,
+                ),
+                job,
+                upgrades.prepare_staging(self.paths, video_id),
+            )
+
+        key = upgrades.stop_key(video_id)
+        self._consume_stop(key)
+        try:
+            with self._download_lock:
+                result = download_video(
+                    video_id,
+                    options,
+                    on_progress=lambda d: self.progress.update(video_id, d),
+                    should_stop=lambda: self._stop_requested(key) or self._stop_event.is_set(),
+                )
+        finally:
+            self.progress.clear(video_id)
+        stopped = self._consume_stop(key)
+        if not stopped and self._stop_event.is_set() and result.failure_reason == FailureReason.cancelled:
+            return None  # shutting down: leave it 'downloading'; the next start queues it again
+
+        with get_session(self.engine) as session:
+            upgrades.record_upgrade_result(session, self.paths, job, result)
+
+        if stopped:
+            return None
+        return random.uniform(self.config.scheduler.gap_min_seconds, self.config.scheduler.gap_max_seconds)
+
     def _run_one_download(self) -> Optional[float]:
         """Returns the jittered gap to wait before the next download, or
         None if the queue was empty (caller falls back to idle polling)."""
+        upgrade_gap = self._run_one_upgrade()
+        if upgrade_gap is not None:
+            return upgrade_gap
+
         with get_session(self.engine) as session:
             video = self._next_queued_video(session)
             if video is None:
@@ -311,12 +379,18 @@ class Scheduler:
                     video_id,
                     options,
                     on_progress=lambda d: self.progress.update(video_id, d),
-                    should_stop=lambda: self._stop_requested(video_id),
+                    should_stop=lambda: self._stop_requested(video_id) or self._stop_event.is_set(),
                 )
         finally:
             self.progress.clear(video_id)
 
         stopped = self._consume_stop(video_id)
+        if not stopped and self._stop_event.is_set() and result.failure_reason == FailureReason.cancelled:
+            # ytpt is shutting down or restarting, so we stop processing this video and
+			# place the video back in line; the partial file lets the next run resume.
+            with get_session(self.engine) as session:
+                archive.reset_stuck_downloads(session)
+            return None
         with get_session(self.engine) as session:
             archive.record_download_attempt_result(
                 session,

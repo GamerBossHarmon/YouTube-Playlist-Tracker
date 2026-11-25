@@ -68,6 +68,9 @@ def create_app(
     # True once the server is shutting down; api.server.run_server wires this to uvicorn.
     # Long-lived SSE streams poll it so they end promptly instead of being cancelled.
     app.state.should_stop = lambda: False
+    # Set by api.server.run_server: asks the whole process to restart itself. None when the
+    # API is not hosted by `ytpt run` (tests, embedding), so the endpoint answers 501.
+    app.state.request_restart = None
 
     if config.server.cors_origins:
         app.add_middleware(

@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from sqlmodel import Session
 
 import core.archive as archive
+import core.upgrades as upgrades
 from core.media import find_subtitles, find_thumbnail, srt_to_vtt
 
 from ..deps import get_session
@@ -40,11 +41,28 @@ def _video_file(session: Session, youtube_id: str) -> Path:
 
 
 @router.get("/{youtube_id}/video")
-def media_video(youtube_id: str, session: Session = Depends(get_session)):
+def media_video(youtube_id: str, download: bool = False, session: Session = Depends(get_session)):
     """The archived file. Starlette's FileResponse answers Range requests, so
-    seeking works in <video>."""
+    seeking works in <video>. With ?download=1 it is sent as an attachment named
+    like the file on disk ("<title> [<id>].<ext>") instead of the URL's last segment."""
     path = _video_file(session, youtube_id)
-    return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    if download:
+        return FileResponse(path, media_type=media_type, filename=path.name)
+    return FileResponse(path, media_type=media_type)
+
+
+@router.get("/{youtube_id}/upgrade")
+def media_upgrade(youtube_id: str, download: bool = False, session: Session = Depends(get_session)):
+    """The staged file of a ready quality upgrade, for previewing next to the current one."""
+    upgrade = upgrades.get_upgrade(session, youtube_id)
+    path = upgrades.staged_file(upgrade) if upgrade else None
+    if path is None:
+        raise HTTPException(status_code=404, detail="No upgraded file is waiting for this video")
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    if download:
+        return FileResponse(path, media_type=media_type, filename=path.name)
+    return FileResponse(path, media_type=media_type)
 
 
 @router.get("/{youtube_id}/thumbnail")

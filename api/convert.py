@@ -9,10 +9,10 @@ import core.accounts as accounts
 import core.archive as archive
 from core.config import Config
 from core.paths import ResolvedPaths
-from core.models import Source, Video
+from core.models import Source, UpgradeStatus, Video, VideoUpgrade
 from core.progress import DownloadProgress
 
-from .schemas import AccountOut, ProgressOut, SourceOut, VideoOut
+from .schemas import AccountOut, ProgressOut, SourceOut, UpgradeOut, VideoOut
 
 
 def video_out(video: Video, model: type[VideoOut] = VideoOut, **extra) -> VideoOut:
@@ -24,6 +24,28 @@ def video_out(video: Video, model: type[VideoOut] = VideoOut, **extra) -> VideoO
         data["local_thumbnail_url"] = f"/api/media/{video.youtube_id}/thumbnail"
     data.update(extra)
     return model(**data)
+
+
+def upgrade_out(upgrade: VideoUpgrade, progress: Optional[DownloadProgress] = None) -> UpgradeOut:
+    ready = upgrade.status == UpgradeStatus.ready
+    return UpgradeOut(
+        video_id=upgrade.video_id,
+        status=upgrade.status,
+        target_height=upgrade.target_height,
+        format_id=upgrade.format_selector.split("[")[0] if upgrade.format_selector else None,
+        error_message=upgrade.error_message,
+        created_at=upgrade.created_at,
+        finished_at=upgrade.finished_at,
+        width=upgrade.width,
+        height=upgrade.height,
+        fps=upgrade.fps,
+        vcodec=upgrade.vcodec,
+        acodec=upgrade.acodec,
+        ext=upgrade.ext,
+        file_size_bytes=upgrade.staged_size_bytes,
+        media_url=f"/api/media/{upgrade.video_id}/upgrade" if ready else None,
+        progress=progress_out(progress) if upgrade.status == UpgradeStatus.downloading else None,
+    )
 
 
 def progress_out(p: Optional[DownloadProgress]) -> Optional[ProgressOut]:

@@ -15,7 +15,9 @@ logger = logging.getLogger(__name__)
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
-def run_server(app: FastAPI, config: Config) -> None:
+def run_server(app: FastAPI, config: Config) -> bool:
+    """Serve until stopped. Returns True when the stop was a restart request from the
+    API (POST /system/restart), so the caller can relaunch the process after cleanup."""
     host, port = config.server.host, config.server.port
     if host not in _LOOPBACK_HOSTS:
         # No built-in auth.
@@ -39,4 +41,13 @@ def run_server(app: FastAPI, config: Config) -> None:
         )
     )
     app.state.should_stop = lambda: server.should_exit or server.force_exit
+
+    restart = {"requested": False}
+
+    def request_restart() -> None:
+        restart["requested"] = True
+        server.should_exit = True  # same path as Ctrl+C: in-flight requests finish, SSE streams end
+
+    app.state.request_restart = request_restart
     server.run()
+    return restart["requested"]

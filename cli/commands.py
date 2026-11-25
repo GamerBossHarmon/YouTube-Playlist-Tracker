@@ -230,9 +230,36 @@ def cmd_download_now(args: argparse.Namespace, config: Config, paths: ResolvedPa
 # --- ytpt run --------------------------------------------------------------------
 
 
+def relaunch_process() -> int:
+    """Start a fresh copy of this same command line (used after POST /system/restart,
+    once everything has been shut down cleanly) and return the exit code to use.
+
+    POSIX replaces the process in place (os.execv), so the PID, the terminal and a
+    Docker container's PID 1 all stay put. Windows cannot exec in place without
+    detaching the console, so this process stays as a thin parent that waits for the
+    new one: the console and Ctrl+C keep behaving as if it were a single process."""
+    import os
+    import subprocess
+    import sys
+
+    argv = [sys.executable] + list(getattr(sys, "orig_argv", [sys.executable] + sys.argv))[1:]
+    print("Restarting ytpt...", flush=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if os.name != "nt":
+        os.execv(sys.executable, argv)  # does not return
+    child = subprocess.Popen(argv)
+    while True:
+        try:
+            return child.wait()
+        except KeyboardInterrupt:
+            continue  # the console sent Ctrl+C to the child too; wait for it to finish
+
+
 def cmd_run(args: argparse.Namespace, config: Config, paths: ResolvedPaths, engine: Engine) -> int:
     scheduler = Scheduler(engine, config, paths)
     scheduler.start()
+    restart = False
     try:
         if config.server.enabled:
             # Imported lazily so the headless path never needs fastapi/uvicorn.
@@ -244,7 +271,7 @@ def cmd_run(args: argparse.Namespace, config: Config, paths: ResolvedPaths, engi
                 f"ytpt running (checks + downloads + API at http://{config.server.host}:{config.server.port}). "
                 "Press Ctrl+C to stop."
             )
-            run_server(app, config)  # blocks; uvicorn handles Ctrl+C
+            restart = run_server(app, config)  # blocks; uvicorn handles Ctrl+C
         else:
             print("ytpt running (checks + downloads). Press Ctrl+C to stop.")
             while True:
@@ -255,4 +282,7 @@ def cmd_run(args: argparse.Namespace, config: Config, paths: ResolvedPaths, engi
         print("\nShutting down...")
         scheduler.shutdown(wait=True)
         print("Stopped.")
+    if restart:
+        engine.dispose()  # release the SQLite file before the new process opens it
+        return relaunch_process()
     return 0

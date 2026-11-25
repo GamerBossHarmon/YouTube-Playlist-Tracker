@@ -9,7 +9,7 @@ from typing import Generic, Optional, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from core.models import EventSeverity, FailureReason, SourceType, VideoStatus
+from core.models import EventSeverity, FailureReason, SourceType, UpgradeStatus, VideoStatus
 
 T = TypeVar("T")
 
@@ -122,6 +122,12 @@ class VideoOut(BaseModel):
     download_account: Optional[str] = None  # pending one-time account override for that request
     file_missing_at: Optional[datetime] = None  # set when a re-check found the file gone from disk
     file_size_bytes: Optional[int]
+    width: Optional[int] = None
+    height: Optional[int] = None
+    fps: Optional[float] = None
+    vcodec: Optional[str] = None  # normalised: av1, vp9, h264, hevc, ...
+    acodec: Optional[str] = None  # opus, aac, ...
+    ext: Optional[str] = None  # container: mkv, mp4, webm, ...
     downloaded_at: Optional[datetime]
     created_at: datetime
     thumbnail_url: Optional[str]  # remote YouTube thumbnail
@@ -151,6 +157,53 @@ class VideoDetail(VideoOut):
     has_thumbnail: bool
     attempt_count: int
     sources: list[VideoMembership]
+
+
+# --- Quality upgrades ----------------------------------------------------------------
+
+
+class FormatOptionOut(BaseModel):
+    format_id: str
+    height: Optional[int] = None
+    width: Optional[int] = None
+    fps: Optional[float] = None
+    vcodec: Optional[str] = None
+    acodec: Optional[str] = None  # null = video-only (best audio is merged in)
+    ext: Optional[str] = None
+    filesize_bytes: Optional[int] = None
+    note: Optional[str] = None
+
+
+class FormatsOut(BaseModel):
+    formats: list[FormatOptionOut]
+
+
+class UpgradeRequest(BaseModel):
+    # Cap the new download at this height; null (with no format_id) = best available.
+    target_height: Optional[int] = Field(default=None, ge=100, le=8640)
+    # One specific format from GET /videos/{id}/formats; overrides target_height.
+    format_id: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9._-]{1,64}$")
+    account: Optional[str] = None  # one-time: download with this account's cookies
+
+
+class UpgradeOut(BaseModel):
+    video_id: str
+    status: UpgradeStatus
+    target_height: Optional[int] = None
+    format_id: Optional[str] = None  # set when one specific format was requested
+    error_message: Optional[str] = None
+    created_at: datetime
+    finished_at: Optional[datetime] = None
+    # The staged file, once status == "ready".
+    width: Optional[int] = None
+    height: Optional[int] = None
+    fps: Optional[float] = None
+    vcodec: Optional[str] = None
+    acodec: Optional[str] = None
+    ext: Optional[str] = None
+    file_size_bytes: Optional[int] = None
+    media_url: Optional[str] = None  # play the staged file (Range-capable)
+    progress: Optional[ProgressOut] = None  # while downloading
 
 
 class CommentOut(BaseModel):
@@ -328,6 +381,15 @@ class YtdlpUpdateOut(BaseModel):
     error_message: Optional[str] = None
 
 
+class RestartRequest(BaseModel):
+    # Restart even though a download is running.
+    force: bool = False
+
+
+class RestartOut(BaseModel):
+    restarting: bool = True
+
+
 class SystemOut(BaseModel):
     version: str
     ytdlp_version: str  # the version this process has loaded
@@ -335,6 +397,8 @@ class SystemOut(BaseModel):
     ytdlp_restart_required: bool = False
     ytdlp_auto_update: bool = True
     scheduler_running: bool
+    download_in_progress: bool = False  # the worker is busy; updating yt-dlp is refused meanwhile
+    restart_supported: bool = False  # this process can restart itself (POST /system/restart)
     cookies_present: bool
     primary_account: Optional[AccountOut] = None  # who the archive downloads as
     source_count: int
@@ -345,3 +409,5 @@ class SystemOut(BaseModel):
     server_host: str
     server_exposed: bool  # bound to something other than loopback
     config: dict
+
+UpgradeOut.model_rebuild()  # ProgressOut is defined further down

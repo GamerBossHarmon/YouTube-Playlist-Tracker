@@ -12,16 +12,33 @@ import core.accounts as accounts
 import core.archive as archive
 from core.config import Config
 from core.media import find_subtitles, find_thumbnail, load_comments, save_comments_to_info_json
-from core.models import DownloadAttempt, Source, SourceVideo, Video, VideoStatus
-from core.downloader import fetch_comments
+import core.upgrades as upgrades
+from core.models import DownloadAttempt, Source, SourceVideo, UpgradeStatus, Video, VideoStatus
+from core.downloader import fetch_comments, probe_formats, specific_format_selector
 from core.paths import ResolvedPaths
 from core.progress import ProgressRegistry
 from core.scheduler import Scheduler
 from pathlib import Path
 
-from ..convert import progress_out, video_out
+from ..convert import progress_out, upgrade_out, video_out
 from ..deps import get_config, get_paths, get_progress, get_scheduler, get_session
-from ..schemas import AttemptOut, CommentsOut, DownloadNowRequest, LocateOut, MoveRequest, Page, QueueItem, QueueOut, VideoDetail, VideoMembership, VideoOut
+from ..schemas import (
+    AttemptOut,
+    CommentsOut,
+    DownloadNowRequest,
+    FormatOptionOut,
+    FormatsOut,
+    LocateOut,
+    MoveRequest,
+    Page,
+    QueueItem,
+    QueueOut,
+    UpgradeOut,
+    UpgradeRequest,
+    VideoDetail,
+    VideoMembership,
+    VideoOut,
+)
 
 router = APIRouter(tags=["videos"])
 
@@ -275,6 +292,103 @@ def download_now(
     if scheduler is not None:
         scheduler.wake()
     return video_out(video)
+
+
+# --- Quality upgrades -------------------------------------------------------------------
+# Download the same video again in another quality into a staging folder; the original
+# video stays until the user accepts or discards the replacment.
+
+
+@router.get("/videos/{youtube_id}/formats", response_model=FormatsOut)
+def video_formats(
+    youtube_id: str,
+    session: Session = Depends(get_session),
+    paths: ResolvedPaths = Depends(get_paths),
+):
+    """Every video format YouTube currently offers for this video (best first).
+    As we are asksing YouTube it takes a few seconds."""
+    _require_video(session, youtube_id)
+    try:
+        options = probe_formats(youtube_id, cookies_file=paths.cookies_file)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=f"Could not list the formats: {exc}")
+    return FormatsOut(formats=[FormatOptionOut(**vars(o)) for o in options])
+
+
+@router.get("/videos/{youtube_id}/upgrade", response_model=Optional[UpgradeOut])
+def get_upgrade(
+    youtube_id: str,
+    session: Session = Depends(get_session),
+    progress: ProgressRegistry = Depends(get_progress),
+):
+    """The video's quality upgrade, or null when none was requested."""
+    _require_video(session, youtube_id)
+    upgrade = upgrades.get_upgrade(session, youtube_id)
+    return upgrade_out(upgrade, progress.get(youtube_id)) if upgrade else None
+
+
+@router.post("/videos/{youtube_id}/upgrade", response_model=UpgradeOut, status_code=201)
+def request_upgrade(
+    youtube_id: str,
+    body: UpgradeRequest,
+    session: Session = Depends(get_session),
+    paths: ResolvedPaths = Depends(get_paths),
+    scheduler: Optional[Scheduler] = Depends(get_scheduler),
+):
+    """Queue a re-download in another quality. It is staged next to the original, which
+    is not touched until you accept the result."""
+    if body.account and body.account != "primary" and not accounts.account_exists(paths, body.account):
+        raise HTTPException(status_code=422, detail=f"Unknown account '{body.account}'")
+    try:
+        upgrade = upgrades.request_upgrade(
+            session,
+            youtube_id,
+            target_height=body.target_height,
+            format_selector=specific_format_selector(body.format_id) if body.format_id else None,
+            account=body.account if body.account != "primary" else None,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    if scheduler is not None:
+        scheduler.wake()
+    return upgrade_out(upgrade)
+
+
+@router.post("/videos/{youtube_id}/upgrade/accept", response_model=VideoOut)
+def accept_upgrade(
+    youtube_id: str,
+    session: Session = Depends(get_session),
+    paths: ResolvedPaths = Depends(get_paths),
+):
+    """Replace the current file with the upgraded one. The old file and its sidecars
+    are deleted for good."""
+    try:
+        video = upgrades.accept_upgrade(session, paths, youtube_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return video_out(video)
+
+
+@router.delete("/videos/{youtube_id}/upgrade", status_code=204)
+def discard_upgrade(
+    youtube_id: str,
+    session: Session = Depends(get_session),
+    paths: ResolvedPaths = Depends(get_paths),
+    scheduler: Optional[Scheduler] = Depends(get_scheduler),
+):
+    """Cancel or discard the upgrade (any state): a running download is stopped and the
+    staged files are deleted. The original file is never touched."""
+    upgrade = upgrades.get_upgrade(session, youtube_id)
+    if upgrade is None:
+        raise HTTPException(status_code=404, detail="No upgrade for this video")
+    downloading = upgrade.status == UpgradeStatus.downloading
+    upgrades.discard_upgrade(session, paths, youtube_id)
+    if downloading and scheduler is not None:
+        scheduler.request_stop(upgrades.stop_key(youtube_id))
 
 
 @router.post("/videos/{youtube_id}/move", response_model=VideoOut)

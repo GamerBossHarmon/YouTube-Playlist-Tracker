@@ -21,6 +21,7 @@ import yt_dlp
 from yt_dlp.utils import DownloadError, parse_bytes, sanitize_filename
 
 from .config import Config, FoldersConfig
+from .formats import FileFormat, format_from_info, normalize_codec
 from .models import FailureReason
 from .paths import ResolvedPaths
 from .ytdlp_support import DEFAULT_JS_RUNTIMES, CapturingLogger, classify_failure, js_runtime_hint
@@ -56,6 +57,10 @@ class DownloadOptions:
     download_comments: bool = False
     max_comments: int = 500
 
+    # A complete yt-dlp format selector that replaces the one derived from max_height
+    # (quality upgrades pick a specific format this way).
+    format_selector: Optional[str] = None
+
 
 @dataclass
 class DownloadResult:
@@ -73,6 +78,7 @@ class DownloadResult:
     file_path: Optional[Path] = None
     info_json_path: Optional[Path] = None
     file_size_bytes: Optional[int] = None
+    file_format: Optional[FileFormat] = None
 
     failure_reason: Optional[FailureReason] = None
     error_message: Optional[str] = None
@@ -194,11 +200,21 @@ def classify_category(info: dict[str, Any], folders: FoldersConfig) -> str:
     return folders.video
 
 
-def _build_format_selector(max_height: Optional[int]) -> str:
-    """Uncapped bestvideo+bestaudio by default, optional height cap."""
+def _build_format_selector(max_height: Optional[int], *, portrait: bool = False) -> str:
+    """Uncapped bestvideo+bestaudio by default, optional height cap.
+
+    `portrait` caps the short side (width) instead: YouTube calls a 1080x1920
+    Short "1080p", but yt-dlp's `height` is the long side there."""
     if max_height is None:
         return "bestvideo+bestaudio/best"
-    return f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]"
+    key = "width" if portrait else "height"
+    return f"bestvideo[{key}<={max_height}]+bestaudio/best[{key}<={max_height}]"
+
+
+def specific_format_selector(format_id: str) -> str:
+    """Selector for one probed format: video-only ones get the best audio merged in,
+    formats that already carry audio are taken as they are."""
+    return f"{format_id}[acodec=none]+bestaudio/{format_id}"
 
 
 # --- ydl_opts construction -----------------------------------------------------
@@ -209,7 +225,7 @@ def _build_ydl_opts(options: DownloadOptions, logger: CapturingLogger, progress_
     if _category_is_home_folder(template):
         template = template[len(_CATEGORY_PREFIX) :]
     opts: dict[str, Any] = {
-        "format": _build_format_selector(options.max_height),
+        "format": options.format_selector or _build_format_selector(options.max_height),
         "outtmpl": _build_outtmpl(template),
         "paths": {"home": str(options.data_dir), "temp": str(options.temp_dir / DOWNLOADING_DIRNAME)},
         "noplaylist": True,
@@ -308,6 +324,7 @@ def _result_from_info(
         file_path=file_path,
         info_json_path=info_json_path if (info_json_path and info_json_path.exists()) else None,
         file_size_bytes=file_size_bytes,
+        file_format=format_from_info(info, file_path),
         verbose_log=verbose_log,
         bytes_downloaded=bytes_downloaded or None,
         started_at=started_at,
@@ -460,6 +477,77 @@ def download_video(
         started_at=started_at,
         finished_at=finished_at,
     )
+
+
+@dataclass
+class FormatOption:
+    format_id: str
+    height: Optional[int]
+    width: Optional[int]
+    fps: Optional[float]
+    vcodec: Optional[str]
+    acodec: Optional[str]  # None = video-only (audio gets merged in on download)
+    ext: Optional[str]
+    filesize_bytes: Optional[int]  # exact or YouTube's estimate; video stream only when video-only
+    note: Optional[str]
+
+
+def probe_formats(video_url_or_id: str, *, cookies_file: Optional[Path] = None) -> list[FormatOption]:
+    """Ask YouTube which video formats exist (no download). Best first. One entry
+    per format id; audio-only streams are left out. Raises RuntimeError on failure."""
+    opts: dict[str, Any] = {
+        "skip_download": True,
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "js_runtimes": DEFAULT_JS_RUNTIMES,
+    }
+    if cookies_file and cookies_file.exists():
+        opts["cookiefile"] = str(cookies_file)
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(_normalize_url(video_url_or_id), download=False)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(str(exc)) from exc
+
+    options: list[FormatOption] = []
+    for f in (info or {}).get("formats") or []:
+        fmt_id = f.get("format_id")
+        vcodec = normalize_codec(f.get("vcodec"))
+        if not fmt_id or vcodec is None:
+            continue  # audio-only, or a storyboard/other non-video entry
+        if f.get("protocol") in ("mhtml",) or f.get("ext") == "mhtml":
+            continue
+        size = f.get("filesize") or f.get("filesize_approx")
+        options.append(
+            FormatOption(
+                format_id=str(fmt_id),
+                height=_as_int(f.get("height")),
+                width=_as_int(f.get("width")),
+                fps=_as_float(f.get("fps")),
+                vcodec=vcodec,
+                acodec=normalize_codec(f.get("acodec"), audio=True),
+                ext=f.get("ext"),
+                filesize_bytes=_as_int(size),
+                note=f.get("format_note"),
+            )
+        )
+    options.sort(key=lambda o: (-(o.height or 0), -(o.fps or 0), -(o.filesize_bytes or 0)))
+    return options
+
+
+def _as_int(value: Any) -> Optional[int]:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float(value: Any) -> Optional[float]:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def fetch_comments(video_url_or_id: str, *, max_comments: int, cookies_file: Optional[Path] = None) -> list[dict[str, Any]]:

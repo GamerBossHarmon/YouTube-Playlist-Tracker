@@ -188,6 +188,37 @@ def log_video_tombstoned(session: Session, *, video_id: str, source_id: Optional
     )
 
 
+# --- Quality upgrade events -----------------------------------------------------
+# The video-scoped ones also refresh the video page in the GUI (see live/events.ts).
+
+
+def log_upgrade_requested(session: Session, *, video_id: str, label: str) -> Event:
+    return log_event(session, "upgrade_requested", f"Quality upgrade requested ({label})", video_id=video_id)
+
+
+def log_upgrade_ready(session: Session, *, video_id: str, label: str) -> Event:
+    return log_event(session, "upgrade_ready", f"Upgrade downloaded ({label}); waiting for your decision", video_id=video_id)
+
+
+def log_upgrade_failed(session: Session, *, video_id: str, message: Optional[str]) -> Event:
+    first_line = (message or "unknown error").strip().splitlines()[0][:200] if (message or "").strip() else "unknown error"
+    return log_event(
+        session,
+        "upgrade_failed",
+        f"Quality upgrade failed: {first_line}",
+        severity=EventSeverity.warning,
+        video_id=video_id,
+    )
+
+
+def log_upgrade_accepted(session: Session, *, video_id: str, label: str) -> Event:
+    return log_event(session, "upgrade_accepted", f"Replaced the file with the upgraded one ({label})", video_id=video_id)
+
+
+def log_upgrade_discarded(session: Session, *, video_id: str) -> Event:
+    return log_event(session, "upgrade_discarded", "Quality upgrade discarded; the original file was kept", video_id=video_id)
+
+
 # --- Scheduler lifecycle events -------------------------------------------------
 
 

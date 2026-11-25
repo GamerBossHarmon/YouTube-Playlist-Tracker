@@ -49,6 +49,13 @@ class FailureReason(str, Enum):
     cancelled = "cancelled"  # the user pressed Fail; not a YouTube-side problem
 
 
+class UpgradeStatus(str, Enum):
+    queued = "queued"          # waiting for the download worker
+    downloading = "downloading"
+    ready = "ready"            # new file staged, waiting for the user to accept or discard
+    failed = "failed"
+
+
 class EventSeverity(str, Enum):
     debug = "debug"
     info = "info"
@@ -103,6 +110,15 @@ class Video(SQLModel, table=True):
     info_json_path: Optional[str] = None
     file_size_bytes: Optional[int] = None
 
+    # `ext` doubles as the "inspected" marker for the startup backfill.
+	# `ext` is set (even when nothing else is known) once a file has been looked at.
+    width: Optional[int] = None
+    height: Optional[int] = None
+    fps: Optional[float] = None
+    vcodec: Optional[str] = None
+    acodec: Optional[str] = None
+    ext: Optional[str] = None
+
     status: VideoStatus = Field(default=VideoStatus.queued, index=True)
     failure_reason: Optional[FailureReason] = None
     retry_count: int = Field(default=0)
@@ -119,6 +135,41 @@ class Video(SQLModel, table=True):
     downloaded_at: Optional[datetime] = Field(default=None, sa_column=Column(UTCDateTime))
     created_at: datetime = Field(default_factory=_utcnow, sa_column=Column(UTCDateTime, nullable=False))
     updated_at: datetime = Field(default_factory=_utcnow, sa_column=Column(UTCDateTime, nullable=False))
+
+
+class VideoUpgrade(SQLModel, table=True):
+    """A request to re-download a downloaded video in another quality.
+
+    The new video is downloaded into a staging folder and the original is left
+    untouched until the user accepts; discarding deletes the staged video. One
+    row per video (a new request replaces a finished/failed one)."""
+    __tablename__ = "video_upgrades"
+
+    video_id: str = Field(foreign_key="videos.youtube_id", primary_key=True, ondelete="CASCADE")
+
+    # What was asked for. target_height None = best available. format_selector is set when the
+    # user picked one specific format from the probed list (it overrides target_height).
+    target_height: Optional[int] = None
+    format_selector: Optional[str] = None
+    # One-time account override for this download, like Video.download_account.
+    account: Optional[str] = None
+
+    status: UpgradeStatus = Field(default=UpgradeStatus.queued, index=True)
+    error_message: Optional[str] = None
+
+    # Filled in when the staged download succeeds.
+    staged_path: Optional[str] = None
+    staged_size_bytes: Optional[int] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    fps: Optional[float] = None
+    vcodec: Optional[str] = None
+    acodec: Optional[str] = None
+    ext: Optional[str] = None
+
+    created_at: datetime = Field(default_factory=_utcnow, sa_column=Column(UTCDateTime, nullable=False))
+    updated_at: datetime = Field(default_factory=_utcnow, sa_column=Column(UTCDateTime, nullable=False))
+    finished_at: Optional[datetime] = Field(default=None, sa_column=Column(UTCDateTime))
 
 
 class SourceVideo(SQLModel, table=True):
@@ -196,6 +247,8 @@ __all__ = [
     "SourceSnapshot",
     "DownloadAttempt",
     "Event",
+    "VideoUpgrade",
+    "UpgradeStatus",
     "SourceType",
     "VideoStatus",
     "FailureReason",

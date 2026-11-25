@@ -81,6 +81,20 @@ def test_models_declare_the_same_ondelete_rules_as_the_migration(tmp_path):
     from_models.dispose()
 
 
+def test_migrations_create_every_column_the_models_declare(tmp_path):
+    """Same trap as the FK rules: tests build tables from the models, so a column
+    added to a model but forgotten in a migration would only fail in production."""
+    from sqlmodel import SQLModel
+
+    migrated_path = tmp_path / "migrated.db"
+    run_migrations(migrated_path, _ALEMBIC_INI)
+    insp = inspect(create_engine(f"sqlite:///{migrated_path}"))
+    for table in SQLModel.metadata.sorted_tables:
+        migrated = {c["name"] for c in insp.get_columns(table.name)}
+        declared = {c.name for c in table.columns}
+        assert declared == migrated, f"{table.name}: models and migrations disagree"
+
+
 def test_deleting_a_source_with_history_works_on_a_migrated_db(tmp_path):
     import core.archive as archive
     import core.events as events

@@ -838,6 +838,51 @@ def source_timeline(
 # --- Recording download attempts ---------------------------------------------
 
 
+def backfill_file_formats(engine, should_stop=None, batch_size: int = 25) -> int:
+    """Fill in resolution/codecs for videos downloaded before formats were recorded:
+    from the .info.json sidecar, else ffprobe. Files that cannot be reached are
+    skipped (and retried on the next start), so an offline drive is harmless.
+    Meant for a background thread; returns how many videos were updated."""
+    from .db import get_session
+    from .formats import detect_file_format
+
+    done = 0
+    skipped: set[str] = set()
+    while not (should_stop and should_stop()):
+        with get_session(engine) as session:
+            stmt = select(Video).where(Video.file_path.is_not(None), Video.ext.is_(None))
+            if skipped:
+                stmt = stmt.where(Video.youtube_id.not_in(skipped))
+            batch = list(session.exec(stmt.limit(batch_size)).all())
+            if not batch:
+                break
+            for video in batch:
+                path = Path(video.file_path)
+                if not path.is_file():
+                    skipped.add(video.youtube_id)
+                    continue
+                info_json = Path(video.info_json_path) if video.info_json_path else None
+                try:
+                    apply_file_format(video, detect_file_format(path, info_json))
+                except Exception:  # noqa: BLE001, one odd file must not stop the scan
+                    skipped.add(video.youtube_id)
+                    continue
+                session.add(video)
+                done += 1
+            session.commit()
+    return done
+
+
+def apply_file_format(target, fmt) -> None:
+    """Copy a core.formats.FileFormat onto a Video / VideoUpgrade row."""
+    target.width = fmt.width
+    target.height = fmt.height
+    target.fps = fmt.fps
+    target.vcodec = fmt.vcodec
+    target.acodec = fmt.acodec
+    target.ext = fmt.ext
+
+
 def record_download_attempt_result(
     session: Session,
     *,
@@ -884,6 +929,8 @@ def record_download_attempt_result(
         video.info_json_path = str(result.info_json_path) if result.info_json_path else video.info_json_path
         if result.file_size_bytes is not None:
             video.file_size_bytes = result.file_size_bytes
+        if result.file_format is not None:
+            apply_file_format(video, result.file_format)
         video.status = VideoStatus.downloaded
         video.file_missing_at = None
         video.failure_reason = None
